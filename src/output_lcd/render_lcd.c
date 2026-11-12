@@ -7,6 +7,7 @@
 
 #include <esp_idf_version.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #if __has_include(<rom/cache.h>)
 #include <rom/cache.h>
@@ -64,6 +65,14 @@ static void IRAM_ATTR handle_lcd_frame_done(RenderContext_t* ctx) {
     portYIELD_FROM_ISR();
 }
 
+static void wait_or_recover(SemaphoreHandle_t semaphore) {
+    if (xSemaphoreTake(semaphore, pdMS_TO_TICKS(3000)) == pdTRUE) return;
+    /* Do not free DMA/feeder resources while they may still be active. */
+    epd_current_board()->poweroff(epd_ctrl_state());
+    ESP_LOGE("epd", "LCD completion timeout; rail off, restarting");
+    esp_restart();
+}
+
 void lcd_do_update(RenderContext_t* ctx) {
     epd_set_mode(1);
 
@@ -76,10 +85,10 @@ void lcd_do_update(RenderContext_t* ctx) {
         xTaskNotifyGive(ctx->feed_tasks[xPortGetCoreID()]);
 
         // transmission is started in renderer threads, now wait util it's done
-        xSemaphoreTake(ctx->frame_done, portMAX_DELAY);
+        wait_or_recover(ctx->frame_done);
 
         for (int i = 0; i < NUM_RENDER_THREADS; i++) {
-            xSemaphoreTake(ctx->feed_done_smphr[i], portMAX_DELAY);
+            wait_or_recover(ctx->feed_done_smphr[i]);
         }
 
         ctx->current_frame++;
@@ -158,7 +167,7 @@ void epd_push_pixels_lcd(RenderContext_t* ctx, short time, int color) {
 
     epd_set_mode(1);
     epd_lcd_start_frame();
-    xSemaphoreTake(ctx->frame_done, portMAX_DELAY);
+    wait_or_recover(ctx->frame_done);
     epd_set_mode(0);
 
     free(ctx->static_line_buffer);
